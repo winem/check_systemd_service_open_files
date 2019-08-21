@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import re
+import sys
+
+from subprocess import run, Popen, PIPE
+
+def main(args):
+    service             = args.service
+    svc_status_command  = 'service {} status'.format(service)
+
+    chk_msg             = {}
+    chk_msg_prefix      = 'OPEN FILES {}'.format(service.upper())
+    chk_state           = 0
+    chk_state_strings   = [ 'OK', 'WARNING', 'CRITICAL', 'UNKNOWN' ]
+    metrics             = {}
+
+    try:
+        svc_state   = run(svc_status_command, shell=True, stdout=PIPE)
+
+        for l in svc_state.stdout.decode('utf-8').split('\n'):
+            if len(l) > 0:
+                if l.strip().startswith('Main PID'):
+                    svc_pid     = l.split()[2]
+                elif l.strip().startswith('Loaded'):
+                    svc_file    = re.search('\((.*);', l.split()[2]).group(1)
+
+    except Exception as e:
+        chk_state   = 3
+        print('{} {} - failed to fetch the pid or service file location by running {}.'.format(chk_msg_prefix, chk_state_strings[chk_state], service, svc_status_command))
+        sys.exit(chk_state)
+
+
+    try:
+        with open(svc_file, 'r') as svc_f:
+            for line in svc_f:
+                if line.startswith('LimitNOFILE'):
+                    svc_limitnofile = int(line.strip().split('=')[1])
+
+    except Exception as e:
+        chk_state = 3
+        print('{} {} - unable to read LimitNOFILE from {}'.format(chk_msg_prefix, chk_state_strings[chk_state], svc_file))
+        sys.exit(chk_state)
+
+
+    ppids       = [ svc_pid ]
+    all_pids    = ppids
+
+    while ppids:
+        for pid in ppids:
+            pid_childs  = Popen([ 'pgrep', '-P', pid ], stdout=PIPE)
+            ppids       = list(filter(None, pid_childs.communicate()[0].decode().strip().split('\n')))
+            all_pids   += ppids
+
+
+    metric          = '{}_open_files'.format(service.lower())
+    metrics[metric] = 0
+    chk_msg[metric] = '{} is not defined yet.'.format(metric)
+
+    for pid in all_pids:
+        try:
+            proc_path   = '/proc/{}/fd/'.format(pid)
+            open_files  = os.listdir(proc_path)
+
+        except Exception as e:
+            chk_state   = 3 
+            print('{} {} - failed to list files in {}'.format(chk_msg_prefix, chk_state_strings[chk_state], proc_path))
+            sys.exit(chk_state)
+
+        else:
+            for d in ( '0', '1', '2'):
+                open_files.remove(d)
+
+            metrics[metric]    += len(open_files)
+            chk_msg[metric]     = '{} is {!s}'.format(metric, metrics[metric])
+
+
+    if args.warn or args.crit:
+        metrics, chk_msg, chk_state = checkMetricsAgainstThresholds(metrics, metric, chk_state, chk_msg, args.warn, args.crit)
+    else:
+        if args.warn_prct or args.crit_prct:
+            warn_value = args.warn_prct * svc_limitnofile // 100
+            crit_value = args.crit_prct * svc_limitnofile // 100
+        else:
+            warn_value = 80 * svc_limitnofile // 100
+            crit_value = 90 * svc_limitnofile // 100
+
+        metrics, chk_msg, chk_state = checkMetricsAgainstThresholds(metrics, metric, chk_state, chk_msg, warn_value, crit_value)
+
+    perf_data       = (' '.join("{!s}={!s}".format(k,v) for (k,v) in metrics.items()))
+    chk_msg_string  = ('; '.join("{!s}".format(v) for (k, v) in chk_msg.items()))
+
+    composed_output = ' '.join((chk_msg_prefix, chk_state_strings[chk_state], '-', chk_msg_string, '|', perf_data))
+
+    print(composed_output)
+    sys.exit(chk_state)
+
+
+def checkMetricsAgainstThresholds(m, m_name, c_state, c_msg,  m_warn=None, m_crit=None):
+    if m_crit and int(m[m_name]) > m_crit:
+        c_state         = 2
+        c_msg[m_name]   = '{} is > {} ({})'.format(m_name, m_crit, m[m_name])
+
+    elif m_warn and int(m[m_name]) > m_warn:
+        if c_state != 2:
+            c_state     = 1
+        
+        c_msg[m_name]   = '{} is > {} ({})'.format(m_name, m_warn, m[m_name])
+
+    else:
+        if c_state not in (1, 2):
+            c_state = 0
+        
+        c_msg[m_name]   = '{} is {}'.format(m_name, m[m_name])
+
+    pd_value        = m[m_name]
+
+    pd_warn         = m_warn if m_warn else ''
+    pd_crit         = m_crit if m_crit else ''
+    
+    m[m_name]       = '{};{};{}'.format(pd_value, pd_warn, pd_crit).strip(';')
+
+    return m, c_msg, c_state
+
+
+def parseArgs():
+    argParser = argparse.ArgumentParser(description='Monitor the number of open files per systemd service.')
+    argParser.add_argument('-s', '--service', dest='service', type=str, required=True, default=False, \
+                            help='Name of the service to monitor the number of open files for.')
+    argParser.add_argument('-w', '--warning', dest='warn', type=int, default=False, \
+                            help='Warning threshold for the number of open files as total number or percentage.')
+    argParser.add_argument('-c', '--critical', dest='crit', type=int, default=False, \
+                            help='Critical threshold for the number of open files as total number or percentage.')
+    argParser.add_argument('--warning-prct', dest='warn_prct', type=int, default=80, \
+                            help='LimitNOFILE needs to be configured in the service file. (Default: 80)')
+    argParser.add_argument('--critical-prct', dest='crit_prct', type=int, default=90, \
+                            help='LimitNOFILE needs to be configured in the service file. (Default: 90)')
+
+    return argParser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parseArgs()
+    main(args)
