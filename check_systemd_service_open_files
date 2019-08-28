@@ -37,6 +37,9 @@ def main(args):
             for line in svc_f:
                 if line.startswith('LimitNOFILE'):
                     svc_limitnofile = int(line.strip().split('=')[1])
+                    break
+                else:
+                    svc_limitnofile = -1
 
     except Exception as e:
         chk_state = 3
@@ -78,7 +81,8 @@ def main(args):
 
     if args.warn or args.crit:
         metrics, chk_msg, chk_state = checkMetricsAgainstThresholds(metrics, metric, chk_state, chk_msg, args.warn, args.crit)
-    else:
+
+    elif svc_limitnofile > -1:
         if args.warn_prct or args.crit_prct:
             warn_value = args.warn_prct * svc_limitnofile // 100
             crit_value = args.crit_prct * svc_limitnofile // 100
@@ -87,6 +91,9 @@ def main(args):
             crit_value = 90 * svc_limitnofile // 100
 
         metrics, chk_msg, chk_state = checkMetricsAgainstThresholds(metrics, metric, chk_state, chk_msg, warn_value, crit_value)
+
+    else:
+        metrics, chk_msg, chk_state = checkMetricsAgainstThresholds(metrics, metric, chk_state, chk_msg)
 
     perf_data       = (' '.join("{!s}={!s}".format(k,v) for (k,v) in metrics.items()))
     chk_msg_string  = ('; '.join("{!s}".format(v) for (k, v) in chk_msg.items()))
