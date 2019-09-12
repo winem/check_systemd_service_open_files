@@ -4,7 +4,7 @@ import os
 import re
 import sys
 
-from subprocess import run, Popen, PIPE
+from subprocess import run, Popen, PIPE, STDOUT
 
 def main(args):
     service             = args.service
@@ -16,20 +16,28 @@ def main(args):
     chk_state_strings   = [ 'OK', 'WARNING', 'CRITICAL', 'UNKNOWN' ]
     metrics             = {}
 
-    try:
-        svc_state   = run(svc_status_command, shell=True, stdout=PIPE)
-
-        for l in svc_state.stdout.decode('utf-8').split('\n'):
-            if len(l) > 0:
-                if l.strip().startswith('Main PID'):
-                    svc_pid     = l.split()[2]
-                elif l.strip().startswith('Loaded'):
-                    svc_file    = re.search('\((.*);', l.split()[2]).group(1)
-
-    except Exception as e:
-        chk_state   = 3
-        print('{} {} - failed to fetch the pid or service file location by running {}.'.format(chk_msg_prefix, chk_state_strings[chk_state], service, svc_status_command))
+    if (args.warn or args.crit) and (args.warn_prct or args.crit_prct):
+        # validate provided threshlds and stop if both, total and percentage values, were provided
+        chk_state           = 3
+        print('{} {} - please use either total numbers or percentage vales and thresholds. Do not mix them. -w and -c or --warning-prct and --critical-prct.'.format(chk_msg_prefix, chk_state_strings[chk_state]))
         sys.exit(chk_state)
+
+    svc_state   = run(svc_status_command, shell=True, stdout=PIPE, stderr=STDOUT)
+
+
+    if svc_state.returncode == 4:
+        # rc 4 == service was not found. Fail with a respective error message
+        chk_state = 3
+        print('{} {} - Service {} was not found.'.format(chk_msg_prefix, chk_state_strings[chk_state], service))
+        sys.exit(chk_state)
+
+
+    for l in svc_state.stdout.decode('utf-8').split('\n'):
+        if len(l) > 0:
+            if l.strip().startswith('Main PID'):
+                svc_pid     = l.split()[2]
+            elif l.strip().startswith('Loaded'):
+                svc_file    = re.search('\((.*);', l.split()[2]).group(1)
 
 
     try:
@@ -52,6 +60,7 @@ def main(args):
 
     while ppids:
         for pid in ppids:
+            # recursively check for child-pids until no more childes can be found
             pid_childs  = Popen([ 'pgrep', '-P', pid ], stdout=PIPE)
             ppids       = list(filter(None, pid_childs.communicate()[0].decode().strip().split('\n')))
             all_pids   += ppids
@@ -140,9 +149,9 @@ def parseArgs():
     argParser.add_argument('-c', '--critical', dest='crit', type=int, default=False, \
                             help='Critical threshold for the number of open files as total number or percentage.')
     argParser.add_argument('--warning-prct', dest='warn_prct', type=int, default=80, \
-                            help='LimitNOFILE needs to be configured in the service file. (Default: 80)')
+                            help='Warning threshold in percent. LimitNOFILE needs to be configured in the service file. (Default: 80)')
     argParser.add_argument('--critical-prct', dest='crit_prct', type=int, default=90, \
-                            help='LimitNOFILE needs to be configured in the service file. (Default: 90)')
+                            help='Critical threshold in percent. LimitNOFILE needs to be configured in the service file. (Default: 90)')
 
     return argParser.parse_args()
 
